@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  grok-bot:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: grok-trading-bot
+    restart: unless-stopped
+    
+    environment:
+      - PYTHONUNBUFFERED=1
+      
+    env_file:
+      - ../.env
+    
+    volumes:
+      - ../logs:/app/logs
+      - ../auth_sessions.json:/app/auth_sessions.json
+    
+    ports:
+      - "8080:8080"  # For webhook endpoints if needed
+    
+    command: python grok_bot.py --daemon
+    
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8080/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: Redis for session storage (production)
+  redis:
+    image: redis:7-alpine
+    container_name: grok-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    profiles:
+      - production
+
+  # Optional: PostgreSQL for advanced analytics
+  postgres:
+    image: postgres:15-alpine
+    container_name: grok-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: grokbot
+      POSTGRES_USER: grokbot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-grokbot123}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    profiles:
+      - production
+
+volumes:
+  redis_data:
+  postgres_data:
+
+networks:
+  default:
+    name: grok-network 
