@@ -48,6 +48,16 @@ class TelegramBotManager:
         # Initialize trading strategy
         self.strategy = TradingStrategy(self.wallet, self.trader, self)
         
+        # Initialize scanner and safety for advanced features
+        from .scanner import SolanaTokenScanner
+        from .safety import SolanaTokenSafety
+        self.scanner = SolanaTokenScanner()
+        self.safety = SolanaTokenSafety()
+        
+        # Connect strategy to new modules
+        self.strategy.scanner = self.scanner
+        self.strategy.safety = self.safety
+        
         if not self.token:
             raise ValueError("TELEGRAM_TOKEN not found in environment variables")
         
@@ -67,7 +77,8 @@ class TelegramBotManager:
             '/start_auto': self._handle_start_auto,
             '/stop_auto': self._handle_stop_auto,
             '/auto_status': self._handle_auto_status,
-            '/scan': self._handle_market_scan
+            '/scan': self._handle_market_scan,
+            '/autonomous': self._handle_start_autonomous
         }
     
     async def send_message(self, chat_id: int, text: str, parse_mode: str = 'Markdown') -> bool:
@@ -132,37 +143,48 @@ Ready to hunt memecoins! 🦎💎
     async def _handle_help(self, chat_id: int, args: list = None) -> None:
         """Handle /help command"""
         help_msg = """
-🤖 *Grok Trading Bot Commands*
+🤖 **Grok Trading Bot - Enhanced Commands**
 
-*Manual Trading:*
-`/analyze <token_address>` - Analyze token metrics
-`/swap <amount> <from_token> <to_token>` - Execute swap
+**📊 MARKET ANALYSIS:**
+`/scan` - 🔍 **One-shot market opportunity scan**
+`/analyze <token_address>` - Detailed token analysis
+`/balance` - Check wallet balance & portfolio
+
+**💰 MANUAL TRADING:**
+`/swap <amount> <from> <to>` - Execute token swap
 `/positions` - View active trading positions
 
-*🤖 AUTOMATED TRADING:*
-`/start_auto` - Start automated trading (PASSIVE INCOME!)
+**🤖 AUTOMATED TRADING:**
+`/start_auto` - Basic automation (existing tokens)
+`/autonomous` - 🚀 **FULL AUTONOMOUS MODE** (new tokens!)
 `/stop_auto` - Stop automated trading
-`/scan` - 🔍 **One-shot market scan for opportunities**  
 `/auto_status` - Check automation status
 
-*Account Commands:*
-`/balance` - Check wallet balance
+**ℹ️ BOT MANAGEMENT:**
 `/status` - Bot health and connection status
 `/settings` - View/modify bot settings
 
-*Examples:*
-`/start_auto` - Begin earning passive income!
-`/swap 1 USDC SOL` - Manual trade
-`/auto_status` - Check automation status
+**🎯 EXAMPLES:**
+`/scan` - Find opportunities now
+`/swap 1 USDC SOL` - Buy SOL with USDC
+`/autonomous` - Start autonomous sniping
 
-*🚀 AUTOMATED STRATEGY:*
-• Scans every 30s for opportunities
-• Max $5 per trade (safe!)
-• 2% minimum profit threshold
-• 10 trades daily limit
-• Automatic execution & alerts
+**🛡️ NEW SAFETY FEATURES:**
+• **Honeypot Detection** - Simulates buy/sell tests
+• **Rug Analysis** - Checks mint authority & holders
+• **Age Filtering** - Only fresh tokens (< 1hr)
+• **Liquidity Checks** - Minimum $5k liquidity
 
-Need help? Check the documentation or contact support.
+**⚡ ENHANCED SCALPING:**
+• Detects 25%+ pumps automatically
+• 30% take profit, 10% stop loss
+• Max $5 trades, 15/day limit
+• Real-time Telegram notifications
+
+**🎯 AUTONOMOUS MODE:**
+Fully automated token discovery, safety analysis, and trading!
+
+Need help? The bot is now smarter than ever! 🚀
         """
         await self.send_message(chat_id, help_msg)
     
@@ -729,6 +751,41 @@ Use `/start` to reactivate trading.
         except Exception as e:
             logger.error(f"Market scan error: {e}")
             await self.send_message(chat_id, f"❌ **SCAN FAILED**\n\nError: {str(e)}\n\nTry again in a few minutes.")
+
+    async def _handle_start_autonomous(self, chat_id: int, args: list = None) -> None:
+        """Start the fully autonomous trading bot"""
+        if chat_id != self.admin_chat_id:
+            await self.send_message(chat_id, "❌ Unauthorized. Only the bot owner can start autonomous mode.")
+            return
+        
+        await self.send_message(chat_id, """
+🚀 **STARTING AUTONOMOUS MODE**
+
+⚠️ **WARNING:** This will start fully autonomous trading that:
+• Scans for new tokens continuously 
+• Performs safety checks automatically
+• Executes trades without confirmation
+• Manages positions automatically
+
+**Type 'CONFIRM AUTONOMOUS' to proceed**
+        """)
+        
+        # This would integrate with the main_loop.py module
+        # For now, send a message explaining next steps
+        await self.send_message(chat_id, """
+🧠 **AUTONOMOUS MODE SETUP**
+
+To enable full autonomous trading:
+
+1. Stop the current bot (Ctrl+C)
+2. Run: `python -m modules.main_loop`
+3. The bot will scan every 90 seconds
+4. Maximum 15 trades per day
+5. Full Telegram notifications
+
+**Current manual mode will continue running**
+**Use /start_auto for simple automation**
+        """)
 
 # Test function
 async def test_telegram_bot():

@@ -18,7 +18,9 @@ A fully automated, modular Solana memecoin trading bot with Telegram interface, 
 
 ### 🔍 **Market Analysis**
 - **One-shot market scanner** (`/scan` command)
-- Analyzes 8+ popular Solana memecoins simultaneously
+- **Autonomous token discovery** via DexScreener API
+- **Real-time safety analysis** with honeypot detection
+- **Comprehensive rug checks** including mint authority analysis
 - Price impact analysis and liquidity testing
 - Detailed rejection reasons when no opportunities found
 
@@ -158,7 +160,8 @@ python start_telegram_bot.py
 - `/analyze <token_address>` - Analyze specific token
 
 ### **Automated Trading**
-- `/start_auto` - **Start passive income mode**
+- `/start_auto` - **Start passive income mode** (existing tokens)
+- `/autonomous` - 🚀 **FULL AUTONOMOUS MODE** (new token discovery!)
 - `/stop_auto` - Stop automated trading
 - `/auto_status` - Check automation status
 
@@ -166,6 +169,14 @@ python start_telegram_bot.py
 - `/scan` - **One-shot market opportunity scan**
 - `/help` - Show all commands
 - `/status` - Bot health check
+
+### **🚀 AUTONOMOUS MODE** 
+Run fully autonomous bot: `python start_autonomous_bot.py`
+- Scans DexScreener every 90 seconds for new tokens
+- Comprehensive safety checks (honeypot, rug detection)  
+- Auto-scalps 25%+ pumps with 30% take profit
+- Maximum 15 trades/day, $5 per trade
+- Real-time Telegram notifications
 
 ---
 

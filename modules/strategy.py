@@ -1,19 +1,44 @@
 """
-Automated Trading Strategy Module
-Scans for opportunities and executes trades automatically
+🤖 Enhanced Trading Strategy Module - Auto Scalp & Snipe
+Advanced autonomous trading with token discovery, safety checks, and scalping strategies
 """
 
 import asyncio
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 import random
 import aiohttp
 import json
+from dataclasses import dataclass
+
+# Import our new modules
+try:
+    from .scanner import Token, SolanaTokenScanner
+    from .safety import SolanaTokenSafety, SafetyResult
+except ImportError:
+    # Fallback for testing
+    import sys
+    import os
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    from scanner import Token, SolanaTokenScanner
+    from safety import SolanaTokenSafety, SafetyResult
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+@dataclass
+class TradePosition:
+    """Active trading position"""
+    token: Token
+    entry_price: float
+    entry_time: datetime
+    amount_usd: float
+    take_profit: float
+    stop_loss: float
+    position_type: str  # 'scalp' or 'swing'
+    transaction_id: Optional[str] = None
 
 class TradingStrategy:
     def __init__(self, wallet, trader, telegram_bot):
@@ -23,13 +48,25 @@ class TradingStrategy:
         self.is_running = False
         self.last_scan = None
         
-        # Strategy parameters
+        # Enhanced strategy parameters
         self.min_profit_threshold = 0.02  # 2% minimum profit
         self.max_trade_size_usd = 5.0     # Max $5 per trade
-        self.scan_interval = 30           # Scan every 30 seconds
-        self.daily_trade_limit = 10       # Max 10 trades per day
+        self.scan_interval = 90           # Scan every 90 seconds (optimized for new tokens)
+        self.daily_trade_limit = 15       # Increased to 15 trades per day
         self.trades_today = 0
         self.last_reset = datetime.now().date()
+        
+        # Scalping parameters
+        self.scalp_take_profit = 0.30     # 30% take profit for scalps
+        self.scalp_stop_loss = 0.10       # 10% stop loss for scalps
+        self.min_pump_threshold = 0.25    # 25% minimum pump to enter
+        self.max_age_minutes = 60         # Only trade tokens < 1 hour old
+        self.min_liquidity_usd = 5000     # Minimum $5k liquidity
+        
+        # Position tracking
+        self.active_positions: List[TradePosition] = []
+        self.scanner: Optional[SolanaTokenScanner] = None
+        self.safety: Optional[SolanaTokenSafety] = None
         
         # Trading pairs to monitor
         self.trading_pairs = [
@@ -409,6 +446,360 @@ class TradingStrategy:
             
         return analysis
 
+    async def evaluate_and_trade(self, token: Token) -> None:
+        """
+        🎯 Enhanced evaluate and trade logic for scalping and sniping
+        
+        Args:
+            token: Token discovered by scanner
+        """
+        try:
+            logger.info(f"🔍 Evaluating {token.symbol} for scalp/snipe opportunity...")
+            
+            # Quick filters before detailed analysis
+            if token.age_minutes > self.max_age_minutes:
+                logger.info(f"❌ {token.symbol} too old: {token.age_minutes}m > {self.max_age_minutes}m")
+                return
+                
+            if token.liquidity_usd < self.min_liquidity_usd:
+                logger.info(f"❌ {token.symbol} low liquidity: ${token.liquidity_usd:,.0f} < ${self.min_liquidity_usd:,.0f}")
+                return
+            
+            # Check if we already have a position in this token
+            for position in self.active_positions:
+                if position.token.address == token.address:
+                    logger.info(f"⏩ Already have position in {token.symbol}")
+                    return
+            
+            # Safety check
+            if self.safety:
+                safety_result = await self.safety.is_token_safe(token)
+                if not safety_result.is_safe:
+                    logger.info(f"🚫 {token.symbol} failed safety check: {safety_result.risk_factors}")
+                    return
+                    
+                logger.info(f"✅ {token.symbol} passed safety check (confidence: {safety_result.confidence_score:.2f})")
+            
+            # Determine trading strategy
+            if token.price_change_5m >= self.min_pump_threshold * 100:  # Convert to percentage
+                await self._execute_scalp_trade(token, safety_result)
+            elif token.volume_5m_usd > 25000 and token.age_minutes < 30:
+                await self._execute_snipe_trade(token, safety_result)
+            else:
+                logger.info(f"📊 {token.symbol} doesn't meet trading criteria")
+                logger.info(f"   5m change: {token.price_change_5m:.1f}% (need >{self.min_pump_threshold*100:.0f}%)")
+                logger.info(f"   Volume: ${token.volume_5m_usd:,.0f} (need >$25k for snipe)")
+                
+        except Exception as e:
+            logger.error(f"❌ Error evaluating {token.symbol}: {e}")
+    
+    async def _execute_scalp_trade(self, token: Token, safety_result: SafetyResult) -> None:
+        """
+        ⚡ Execute scalping trade for pumping token
+        
+        Args:
+            token: Token to scalp
+            safety_result: Safety analysis result
+        """
+        try:
+            logger.info(f"⚡ SCALP OPPORTUNITY: {token.symbol} (+{token.price_change_5m:.1f}%)")
+            
+            # Calculate position size based on confidence
+            confidence_multiplier = min(safety_result.confidence_score * 1.5, 1.0)
+            position_size_usd = self.max_trade_size_usd * confidence_multiplier
+            
+            # Execute buy order
+            buy_result = await self._execute_buy_order(token, position_size_usd, 'scalp')
+            
+            if buy_result['success']:
+                logger.info(f"✅ Scalp entry successful: {token.symbol} @ ${position_size_usd:.2f}")
+                
+                # Add position to tracking
+                position = TradePosition(
+                    token=token,
+                    entry_price=token.price_usd,
+                    entry_time=datetime.utcnow(),
+                    amount_usd=position_size_usd,
+                    take_profit=token.price_usd * (1 + self.scalp_take_profit),
+                    stop_loss=token.price_usd * (1 - self.scalp_stop_loss),
+                    position_type='scalp',
+                    transaction_id=buy_result.get('transaction_id')
+                )
+                
+                self.active_positions.append(position)
+                self.trades_today += 1
+                
+                # Notify via Telegram
+                await self._notify_trade_entry(position)
+                
+            else:
+                logger.error(f"❌ Scalp entry failed for {token.symbol}: {buy_result.get('error')}")
+                
+        except Exception as e:
+            logger.error(f"❌ Scalp execution error for {token.symbol}: {e}")
+    
+    async def _execute_snipe_trade(self, token: Token, safety_result: SafetyResult) -> None:
+        """
+        🎯 Execute snipe trade for high volume early token
+        
+        Args:
+            token: Token to snipe
+            safety_result: Safety analysis result
+        """
+        try:
+            logger.info(f"🎯 SNIPE OPPORTUNITY: {token.symbol} (${token.volume_5m_usd:,.0f} volume)")
+            
+            # More conservative sizing for snipes
+            confidence_multiplier = safety_result.confidence_score * 0.8
+            position_size_usd = self.max_trade_size_usd * confidence_multiplier
+            
+            # Execute buy order
+            buy_result = await self._execute_buy_order(token, position_size_usd, 'snipe')
+            
+            if buy_result['success']:
+                logger.info(f"✅ Snipe entry successful: {token.symbol} @ ${position_size_usd:.2f}")
+                
+                # More aggressive targets for snipes
+                position = TradePosition(
+                    token=token,
+                    entry_price=token.price_usd,
+                    entry_time=datetime.utcnow(),
+                    amount_usd=position_size_usd,
+                    take_profit=token.price_usd * 1.50,  # 50% target
+                    stop_loss=token.price_usd * 0.85,   # 15% stop loss
+                    position_type='snipe',
+                    transaction_id=buy_result.get('transaction_id')
+                )
+                
+                self.active_positions.append(position)
+                self.trades_today += 1
+                
+                # Notify via Telegram
+                await self._notify_trade_entry(position)
+                
+            else:
+                logger.error(f"❌ Snipe entry failed for {token.symbol}: {buy_result.get('error')}")
+                
+        except Exception as e:
+            logger.error(f"❌ Snipe execution error for {token.symbol}: {e}")
+    
+    async def _execute_buy_order(self, token: Token, amount_usd: float, trade_type: str) -> Dict[str, Any]:
+        """
+        💰 Execute buy order using GMGN
+        
+        Args:
+            token: Token to buy
+            amount_usd: USD amount to spend
+            trade_type: 'scalp' or 'snipe'
+            
+        Returns:
+            Trade execution result
+        """
+        try:
+            # Get swap route
+            route = await self.trader.get_swap_route(
+                token_in_address='EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',  # USDC
+                token_out_address=token.address,
+                in_amount=amount_usd,
+                from_address=self.wallet.get_address(),
+                slippage=2.0  # 2% slippage for fast execution
+            )
+            
+            if not route.get('success'):
+                return {'success': False, 'error': route.get('error', 'Route failed')}
+            
+            # Execute the swap
+            result = await self.wallet.execute_swap(route)
+            
+            if result.get('success'):
+                return {
+                    'success': True,
+                    'transaction_id': result.get('signature'),
+                    'amount_usd': amount_usd,
+                    'trade_type': trade_type
+                }
+            else:
+                return {'success': False, 'error': result.get('error', 'Execution failed')}
+                
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    async def _notify_trade_entry(self, position: TradePosition) -> None:
+        """
+        📱 Send Telegram notification for trade entry
+        
+        Args:
+            position: Trade position entered
+        """
+        try:
+            message = f"""
+🚀 **{position.position_type.upper()} ENTRY**
+
+💎 **{position.token.symbol}** ({position.token.name})
+📍 Address: `{position.token.address}`
+💰 Position: ${position.amount_usd:.2f}
+📈 Entry: ${position.entry_price:.8f}
+🎯 Target: ${position.take_profit:.8f} (+{((position.take_profit/position.entry_price)-1)*100:.1f}%)
+🛑 Stop: ${position.stop_loss:.8f} ({((position.stop_loss/position.entry_price)-1)*100:.1f}%)
+
+📊 **Token Metrics:**
+⏰ Age: {position.token.age_minutes}m
+💧 Liquidity: ${position.token.liquidity_usd:,.0f}
+📈 5m Change: {position.token.price_change_5m:+.1f}%
+📊 Volume: ${position.token.volume_5m_usd:,.0f}
+
+🔗 [View on Solscan](https://solscan.io/token/{position.token.address})
+"""
+            
+            if self.telegram_bot and hasattr(self.telegram_bot, 'admin_chat_id'):
+                await self.telegram_bot.send_message(
+                    self.telegram_bot.admin_chat_id,
+                    message,
+                    parse_mode='Markdown'
+                )
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to send trade notification: {e}")
+    
+    async def monitor_positions(self) -> None:
+        """
+        👀 Monitor active positions and execute stop losses / take profits
+        """
+        try:
+            if not self.active_positions:
+                return
+                
+            logger.info(f"👀 Monitoring {len(self.active_positions)} active positions...")
+            
+            positions_to_close = []
+            
+            for position in self.active_positions:
+                try:
+                    # Get current price (simplified - in reality you'd get from multiple sources)
+                    current_price = await self._get_current_token_price(position.token.address)
+                    
+                    if current_price is None:
+                        logger.warning(f"⚠️ Could not get price for {position.token.symbol}")
+                        continue
+                    
+                    # Calculate PnL
+                    pnl_pct = ((current_price / position.entry_price) - 1) * 100
+                    
+                    # Check exit conditions
+                    should_exit = False
+                    exit_reason = ""
+                    
+                    if current_price >= position.take_profit:
+                        should_exit = True
+                        exit_reason = f"Take profit hit: {pnl_pct:+.1f}%"
+                    elif current_price <= position.stop_loss:
+                        should_exit = True
+                        exit_reason = f"Stop loss hit: {pnl_pct:+.1f}%"
+                    elif (datetime.utcnow() - position.entry_time).total_seconds() > 3600:  # 1 hour max hold
+                        should_exit = True
+                        exit_reason = f"Time exit (1h): {pnl_pct:+.1f}%"
+                    
+                    if should_exit:
+                        # Execute exit
+                        exit_result = await self._execute_exit_order(position, current_price)
+                        
+                        if exit_result['success']:
+                            logger.info(f"✅ {exit_reason} - {position.token.symbol} closed")
+                            positions_to_close.append(position)
+                            
+                            # Notify exit
+                            await self._notify_trade_exit(position, current_price, exit_reason, pnl_pct)
+                        else:
+                            logger.error(f"❌ Failed to close {position.token.symbol}: {exit_result.get('error')}")
+                    else:
+                        logger.info(f"📊 {position.token.symbol}: {pnl_pct:+.1f}% (${current_price:.8f})")
+                        
+                except Exception as e:
+                    logger.error(f"❌ Error monitoring position {position.token.symbol}: {e}")
+            
+            # Remove closed positions
+            for position in positions_to_close:
+                self.active_positions.remove(position)
+                
+        except Exception as e:
+            logger.error(f"❌ Position monitoring error: {e}")
+    
+    async def _get_current_token_price(self, token_address: str) -> Optional[float]:
+        """Get current token price from DexScreener"""
+        try:
+            if not hasattr(self, '_price_session'):
+                self._price_session = aiohttp.ClientSession()
+            
+            url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
+            
+            async with self._price_session.get(url) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    pairs = data.get('pairs', [])
+                    
+                    if pairs:
+                        # Get the most liquid pair
+                        best_pair = max(pairs, key=lambda p: float(p.get('liquidity', {}).get('usd', 0) or 0))
+                        return float(best_pair.get('priceUsd', 0) or 0)
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Price fetch error for {token_address}: {e}")
+            return None
+    
+    async def _execute_exit_order(self, position: TradePosition, current_price: float) -> Dict[str, Any]:
+        """Execute exit order for position"""
+        try:
+            # Calculate token amount to sell (simplified - in reality track exact amounts)
+            token_amount = position.amount_usd / position.entry_price
+            
+            # Get exit route
+            route = await self.trader.get_swap_route(
+                token_in_address=position.token.address,
+                token_out_address='EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',  # USDC
+                in_amount=token_amount,
+                from_address=self.wallet.get_address(),
+                slippage=3.0  # Higher slippage for fast exit
+            )
+            
+            if not route.get('success'):
+                return {'success': False, 'error': route.get('error')}
+            
+            # Execute the swap
+            result = await self.wallet.execute_swap(route)
+            return result
+            
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    async def _notify_trade_exit(self, position: TradePosition, exit_price: float, reason: str, pnl_pct: float) -> None:
+        """Send exit notification"""
+        try:
+            profit_emoji = "🟢" if pnl_pct > 0 else "🔴"
+            
+            message = f"""
+{profit_emoji} **{position.position_type.upper()} EXIT**
+
+💎 **{position.token.symbol}** 
+🚪 Exit: ${exit_price:.8f}
+📊 PnL: {pnl_pct:+.1f}%
+💰 ${position.amount_usd:.2f} → ${position.amount_usd * (1 + pnl_pct/100):.2f}
+
+📋 **Reason:** {reason}
+⏰ Hold time: {(datetime.utcnow() - position.entry_time).total_seconds()/60:.0f}m
+"""
+            
+            if self.telegram_bot and hasattr(self.telegram_bot, 'admin_chat_id'):
+                await self.telegram_bot.send_message(
+                    self.telegram_bot.admin_chat_id,
+                    message,
+                    parse_mode='Markdown'
+                )
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to send exit notification: {e}")
+
     def get_status(self) -> Dict[str, Any]:
         """Get current strategy status"""
         return {
@@ -418,5 +809,11 @@ class TradingStrategy:
             'min_profit': self.min_profit_threshold,
             'max_trade_size': self.max_trade_size_usd,
             'scan_interval': self.scan_interval,
-            'last_scan': self.last_scan
+            'last_scan': self.last_scan,
+            'active_positions': len(self.active_positions),
+            'scalp_params': {
+                'take_profit': f"{self.scalp_take_profit*100:.0f}%",
+                'stop_loss': f"{self.scalp_stop_loss*100:.0f}%",
+                'min_pump': f"{self.min_pump_threshold*100:.0f}%"
+            }
         } 
