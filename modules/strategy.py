@@ -345,7 +345,7 @@ class TradingStrategy:
         return scan_results
 
     async def _analyze_token_opportunity(self, token_symbol: str, token_address: str, usdc_balance: float, sol_balance: float, sol_price: float) -> Dict[str, Any]:
-        """Analyze a specific token for trading opportunity with detailed feedback"""
+        """Analyze a specific token for trading opportunity"""
         
         analysis = {
             'token': token_symbol,
@@ -354,38 +354,19 @@ class TradingStrategy:
             'profit_score': 0,
             'reason': '',
             'rejection_reason': '',
-            'detailed_feedback': '',
-            'market_data': {},
             'metrics': {},
-            'suggested_amount': 0,
-            'price_movement': 'unknown',
-            'risk_level': 'unknown'
+            'suggested_amount': 0
         }
         
         try:
-            # First, get real-time market data from DexScreener
-            await self._fetch_market_data(analysis, token_address, token_symbol)
-            
             # Test a small USDC->Token swap to get pricing info
             test_amount = min(2.0, usdc_balance * 0.5)  # Test with $2 or 50% of balance
             if test_amount < 1.0:
                 analysis['rejection_reason'] = 'Insufficient balance for meaningful test'
                 analysis['reason'] = f'Need at least $1 USDC for testing, have ${usdc_balance:.2f}'
-                analysis['detailed_feedback'] = f"""
-🔴 **{token_symbol} - INSUFFICIENT BALANCE**
-
-💰 **Your Balance Issue:**
-• Current USDC: ${usdc_balance:.2f}
-• Minimum needed: $1.00 for testing
-• Recommendation: Add more USDC to test opportunities
-
-📊 **Market Context:**
-• {analysis['market_data'].get('price_trend', 'Unable to fetch price data')}
-• This token might have potential but can't analyze properly
-                """
                 return analysis
                 
-            # Get swap route from USDC to token (with enhanced error handling)
+            # Get swap route from USDC to token
             route_result = await self.trader.get_swap_route(
                 token_in_address='EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',  # USDC
                 token_out_address=token_address,
@@ -397,92 +378,24 @@ class TradingStrategy:
             if not route_result.get('success'):
                 analysis['rejection_reason'] = 'No swap route available'
                 analysis['reason'] = f'GMGN API could not find a route for {token_symbol}'
-                
-                # Enhanced feedback for swap route failures
-                route_error = route_result.get('error', 'Unknown routing error')
-                analysis['detailed_feedback'] = f"""
-⚠️ **{token_symbol} - NO SWAP ROUTE AVAILABLE**
-
-🔄 **Routing Issue:**
-• GMGN API Error: {route_error}
-• This usually means: Low liquidity, delisted, or routing problems
-• The token exists but can't be traded efficiently right now
-
-📊 **Market Analysis:**
-{analysis['market_data'].get('detailed_analysis', '• Unable to fetch current market data')}
-
-💡 **What This Means:**
-• Token might be too illiquid for safe trading
-• Could be experiencing technical issues
-• May have been delisted from major DEXs
-• Wait for better liquidity or try a different token
-
-🎯 **Alternative Action:**
-Try manual swap with very small amount to test: `/swap 0.5 USDC {token_symbol}`
-                """
                 return analysis
                 
             quote = route_result.get('quote', {})
             price_impact = float(quote.get('priceImpactPct', 100))
             
-            # Enhanced price impact analysis
+            # Analyze price impact
             analysis['metrics']['price_impact'] = price_impact
-            analysis['metrics']['estimated_tokens'] = float(quote.get('outAmount', 0))
             
             if price_impact > 10.0:
                 analysis['rejection_reason'] = 'High price impact'
                 analysis['reason'] = f'Price impact too high: {price_impact:.2f}% (max: 10%)'
-                analysis['risk_level'] = 'very_high'
-                analysis['detailed_feedback'] = f"""
-🔴 **{token_symbol} - HIGH PRICE IMPACT RISK**
-
-⚠️ **Price Impact Analysis:**
-• Your ${test_amount:.2f} trade would cause {price_impact:.2f}% price impact
-• This is VERY HIGH (safe level: <3%)
-• Indicates low liquidity or large trade size
-
-📊 **Market Context:**
-{analysis['market_data'].get('detailed_analysis', '• Price movement data unavailable')}
-
-💡 **Why This Matters:**
-• You'd buy at artificially high prices
-• Could be hard to sell without big losses
-• Token may be low-volume or manipulated
-
-🎯 **Better Strategy:**
-• Wait for higher liquidity
-• Try smaller amount like $0.50
-• Look for tokens with <3% impact
-• Consider popular tokens instead
-                """
                 return analysis
                 
             if price_impact > 5.0:
                 analysis['rejection_reason'] = 'Moderate price impact'
                 analysis['reason'] = f'Price impact concerning: {price_impact:.2f}% (prefer <5%)'
-                analysis['risk_level'] = 'high'
-                analysis['detailed_feedback'] = f"""
-🟡 **{token_symbol} - MODERATE PRICE IMPACT**
-
-⚠️ **Price Impact Analysis:**
-• Your ${test_amount:.2f} trade would cause {price_impact:.2f}% price impact
-• This is HIGHER than ideal (prefer <3%)
-• Tradeable but not optimal
-
-📊 **Market Context:**
-{analysis['market_data'].get('detailed_analysis', '• Price movement data unavailable')}
-
-💡 **Risk Assessment:**
-• Acceptable for small trades
-• Watch out for slippage on larger amounts
-• Could indicate moderate liquidity
-
-🎯 **If You Trade:**
-• Keep position size very small
-• Use higher slippage tolerance (2-3%)
-• Monitor closely for exit opportunities
-                """
-            
+                return analysis
+                
             # Check if there's a reverse route (liquidity test)
             reverse_route = await self.trader.get_swap_route(
                 token_in_address=token_address,
@@ -498,219 +411,40 @@ Try manual swap with very small amount to test: `/swap 0.5 USDC {token_symbol}`
                 reverse_price_impact = float(reverse_quote.get('priceImpactPct', 100))
                 
             analysis['metrics']['reverse_price_impact'] = reverse_price_impact
-            analysis['metrics']['round_trip_efficiency'] = self._calculate_round_trip_efficiency(test_amount, reverse_quote.get('outAmount', '0'))
             
             if reverse_price_impact > 15.0:
                 analysis['rejection_reason'] = 'Poor exit liquidity'
                 analysis['reason'] = f'Difficult to sell back: {reverse_price_impact:.2f}% impact'
-                analysis['risk_level'] = 'very_high'
-                analysis['detailed_feedback'] = f"""
-🔴 **{token_symbol} - POOR EXIT LIQUIDITY**
-
-🚪 **Exit Analysis:**
-• Selling would cause {reverse_price_impact:.2f}% price impact
-• This is VERY HIGH (danger zone: >10%)
-• Could get stuck in the position
-
-📊 **Market Context:**
-{analysis['market_data'].get('detailed_analysis', '• Price movement data unavailable')}
-
-💡 **Why This Is Dangerous:**
-• Easy to buy, hard to sell
-• Could be a "honeypot" or low-liquidity trap
-• Risk of significant losses on exit
-
-🎯 **Recommendation:**
-• AVOID this token for now
-• Look for tokens with <10% exit impact
-• Wait for better liquidity conditions
-• Consider more established tokens
-                """
                 return analysis
                 
-            # Calculate profit potential and trading costs
+            # Calculate profit potential (this is simplified - in reality you'd want more complex analysis)
             total_slippage = price_impact + reverse_price_impact
-            analysis['metrics']['total_trading_cost'] = total_slippage
-            
             if total_slippage > 8.0:
                 analysis['rejection_reason'] = 'High round-trip cost'
                 analysis['reason'] = f'Total trading cost: {total_slippage:.2f}% (too high for profit)'
-                analysis['risk_level'] = 'high'
-                analysis['detailed_feedback'] = f"""
-🟡 **{token_symbol} - HIGH TRADING COSTS**
-
-💸 **Cost Analysis:**
-• Buy Impact: {price_impact:.2f}%
-• Sell Impact: {reverse_price_impact:.2f}%
-• Total Cost: {total_slippage:.2f}%
-• Need >{total_slippage:.2f}% price move just to break even
-
-📊 **Market Context:**
-{analysis['market_data'].get('detailed_analysis', '• Price movement data unavailable')}
-
-💡 **Profitability Challenge:**
-• High trading costs eat into profits
-• Token needs significant movement to be profitable
-• Better opportunities likely exist
-
-🎯 **Strategy:**
-• Wait for better market conditions
-• Look for tokens with <5% total cost
-• Consider tokens with recent momentum
-                """
                 return analysis
                 
             # This token passes basic tests - it's an opportunity!
             analysis['is_opportunity'] = True
             analysis['profit_score'] = 10.0 - total_slippage  # Higher score = better opportunity
             analysis['suggested_amount'] = min(self.max_trade_size_usd, usdc_balance * 0.2)  # Suggest 20% of balance or max trade size
-            analysis['risk_level'] = 'low' if total_slippage < 3.0 else 'moderate'
             
-            # Generate positive reasoning with detailed feedback
+            # Generate positive reasoning
             reasons = []
             if price_impact < 2.0:
-                reasons.append(f"Excellent liquidity ({price_impact:.2f}% impact)")
-            elif price_impact < 5.0:
-                reasons.append(f"Good liquidity ({price_impact:.2f}% impact)")
-            
-            if reverse_price_impact < 5.0:
-                reasons.append(f"Easy exit ({reverse_price_impact:.2f}% impact)")
-            elif reverse_price_impact < 10.0:
-                reasons.append(f"Reasonable exit ({reverse_price_impact:.2f}% impact)")
-            
-            if total_slippage < 3.0:
+                reasons.append(f"Low price impact ({price_impact:.2f}%)")
+            if reverse_price_impact < 10.0:
+                reasons.append(f"Good exit liquidity ({reverse_price_impact:.2f}%)")
+            if total_slippage < 5.0:
                 reasons.append(f"Low trading costs ({total_slippage:.2f}%)")
-            elif total_slippage < 5.0:
-                reasons.append(f"Acceptable costs ({total_slippage:.2f}%)")
                 
-            analysis['reason'] = "OPPORTUNITY: " + ", ".join(reasons)
-            analysis['detailed_feedback'] = f"""
-🟢 **{token_symbol} - TRADING OPPORTUNITY FOUND!**
-
-✅ **Opportunity Analysis:**
-• Buy Impact: {price_impact:.2f}% (Excellent: <2%)
-• Sell Impact: {reverse_price_impact:.2f}% (Good: <10%)
-• Total Cost: {total_slippage:.2f}% (Low: <5%)
-• Profit Score: {analysis['profit_score']:.1f}/10
-
-📊 **Market Context:**
-{analysis['market_data'].get('detailed_analysis', '• Price movement data unavailable')}
-
-💡 **Why This Works:**
-• Good liquidity for entry and exit
-• Low trading costs allow for profit
-• Established token with decent volume
-
-🎯 **Suggested Action:**
-`/swap {analysis['suggested_amount']:.1f} USDC {token_symbol}`
-
-⚠️ **Risk Management:**
-• Start with suggested amount
-• Set stop loss at -10%
-• Take profits at +15-20%
-• Monitor closely after entry
-            """
+            analysis['reason'] = "Good opportunity: " + ", ".join(reasons)
             
         except Exception as e:
             analysis['rejection_reason'] = 'Analysis error'
             analysis['reason'] = f'Technical error: {str(e)}'
-            analysis['detailed_feedback'] = f"""
-🔴 **{token_symbol} - ANALYSIS ERROR**
-
-❌ **Technical Issue:**
-• Error: {str(e)}
-• Unable to complete full analysis
-• This could be temporary
-
-🔄 **Possible Causes:**
-• API rate limiting
-• Network connectivity issues
-• Token data unavailable
-• Temporary service disruption
-
-🎯 **Next Steps:**
-• Try scanning again in a few minutes
-• Check if token address is correct
-• Consider manual testing with small amount
-            """
             
         return analysis
-
-    def _calculate_round_trip_efficiency(self, initial_usdc: float, final_usdc_str: str) -> float:
-        """Calculate how much USDC you'd get back from a round-trip trade"""
-        try:
-            final_usdc = float(final_usdc_str) / 1000000  # Convert from USDC units
-            return (final_usdc / initial_usdc) if initial_usdc > 0 else 0
-        except:
-            return 0
-
-    async def _fetch_market_data(self, analysis: dict, token_address: str, token_symbol: str):
-        """Fetch real-time market data from DexScreener"""
-        try:
-            if not hasattr(self, '_market_session'):
-                self._market_session = aiohttp.ClientSession()
-            
-            url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
-            
-            async with self._market_session.get(url) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    pairs = data.get('pairs', [])
-                    
-                    if pairs:
-                        # Get the most liquid pair
-                        best_pair = max(pairs, key=lambda p: float(p.get('liquidity', {}).get('usd', 0) or 0))
-                        
-                        price_usd = float(best_pair.get('priceUsd', 0) or 0)
-                        price_change_5m = float(best_pair.get('priceChange', {}).get('m5', 0) or 0)
-                        price_change_1h = float(best_pair.get('priceChange', {}).get('h1', 0) or 0)
-                        price_change_24h = float(best_pair.get('priceChange', {}).get('h24', 0) or 0)
-                        volume_24h = float(best_pair.get('volume', {}).get('h24', 0) or 0)
-                        liquidity_usd = float(best_pair.get('liquidity', {}).get('usd', 0) or 0)
-                        
-                        analysis['market_data'] = {
-                            'price_usd': price_usd,
-                            'price_change_5m': price_change_5m,
-                            'price_change_1h': price_change_1h,
-                            'price_change_24h': price_change_24h,
-                            'volume_24h': volume_24h,
-                            'liquidity_usd': liquidity_usd,
-                            'dex': best_pair.get('dexId', 'unknown')
-                        }
-                        
-                        # Determine price movement trend
-                        if price_change_1h > 5:
-                            analysis['price_movement'] = 'pumping'
-                        elif price_change_1h < -5:
-                            analysis['price_movement'] = 'dumping'
-                        elif abs(price_change_1h) < 1:
-                            analysis['price_movement'] = 'flat'
-                        else:
-                            analysis['price_movement'] = 'stable'
-                        
-                        # Create detailed analysis text
-                        movement_emoji = {
-                            'pumping': '🚀',
-                            'dumping': '📉',
-                            'flat': '😴',
-                            'stable': '📊'
-                        }
-                        
-                        analysis['market_data']['detailed_analysis'] = f"""• Price: ${price_usd:.6f}
-• 5m: {price_change_5m:+.1f}% | 1h: {price_change_1h:+.1f}% | 24h: {price_change_24h:+.1f}%
-• 24h Volume: ${volume_24h:,.0f}
-• Liquidity: ${liquidity_usd:,.0f}
-• Status: {movement_emoji.get(analysis['price_movement'], '❓')} {analysis['price_movement'].title()}"""
-                        
-                        analysis['market_data']['price_trend'] = f"Currently {analysis['price_movement']} ({price_change_1h:+.1f}% 1h)"
-                        
-                    else:
-                        analysis['market_data']['price_trend'] = "No active trading pairs found"
-                        analysis['market_data']['detailed_analysis'] = "• No market data available from DexScreener"
-                        
-        except Exception as e:
-            analysis['market_data']['price_trend'] = f"Market data fetch failed: {str(e)}"
-            analysis['market_data']['detailed_analysis'] = f"• Unable to fetch market data: {str(e)}"
 
     async def evaluate_and_trade(self, token: Token) -> None:
         """
