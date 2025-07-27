@@ -16,7 +16,7 @@ load_dotenv()
 # Add current directory to path for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from modules.telegram_bot import TelegramBotManager
+from modules.telegram_bot import TelegramBot
 
 # Setup logging
 logging.basicConfig(
@@ -50,7 +50,8 @@ async def main():
         print("=" * 60)
         
         # Initialize and start the bot
-        bot = TelegramBotManager()
+        bot = TelegramBot()
+        await bot.initialize_strategy()
         print(f"✅ Bot initialized successfully")
         print(f"🔗 Bot URL: https://t.me/ebrenillabDegen_Bot")
         print("\n🚀 Bot is now listening for commands...")

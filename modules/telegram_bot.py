@@ -13,74 +13,133 @@ import aiohttp
 try:
     from modules.auth import AuthManager
     from modules.trades import GMGNTrader
-    from modules.metrics import OnChainMetrics
     from modules.wallet import SolanaWallet
-    from modules.strategy import TradingStrategy
-except ImportError:
-    # Handle import when running from different directory
-    import sys
-    import os
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from modules.auth import AuthManager
-    from modules.trades import GMGNTrader
     from modules.metrics import OnChainMetrics
-    from modules.wallet import SolanaWallet
     from modules.strategy import TradingStrategy
-
-# Setup logging
-logging.basicConfig(level=logging.INFO)
+    from modules.scanner import SolanaTokenScanner
+    from modules.safety import SolanaTokenSafety
+    
+    # Import Agent SDK
+    from modules.agent_sdk import GrokBotAgent
+    from modules.chat_interface import ChatInterface, TelegramAgentInterface
+except ImportError as e:
+    print(f"Import error: {e}")
+    # Mock classes for development
+    
 logger = logging.getLogger(__name__)
 
-class TelegramBotManager:
+class TelegramBot:
     def __init__(self):
-        self.token = os.getenv('TELEGRAM_TOKEN')
-        self.auth_manager = AuthManager()
-        self.trader = GMGNTrader()
-        self.metrics = OnChainMetrics()
-        self.wallet = SolanaWallet()
-        
-        # Store pending swaps for confirmation
-        self.pending_swaps = {}
-        
-        # Get admin chat ID (your Telegram user ID)
-        self.admin_chat_id = int(os.getenv('ADMIN_CHAT_ID', '1508863163'))  # Your user ID
-        
-        # Initialize trading strategy
-        self.strategy = TradingStrategy(self.wallet, self.trader, self)
-        
-        # Initialize scanner and safety for advanced features
-        from .scanner import SolanaTokenScanner
-        from .safety import SolanaTokenSafety
-        self.scanner = SolanaTokenScanner()
-        self.safety = SolanaTokenSafety()
-        
-        # Connect strategy to new modules
-        self.strategy.scanner = self.scanner
-        self.strategy.safety = self.safety
-        
+        self.token = os.getenv('TELEGRAM_BOT_TOKEN')
         if not self.token:
-            raise ValueError("TELEGRAM_TOKEN not found in environment variables")
+            raise ValueError("TELEGRAM_BOT_TOKEN not found in environment variables")
         
         self.base_url = f"https://api.telegram.org/bot{self.token}"
+        self.session = None
+        self.running = False
+        
+        # Initialize components
+        self.auth = AuthManager()
+        self.trader = GMGNTrader()
+        self.wallet = SolanaWallet()
+        self.metrics = OnChainMetrics()
+        self.strategy = None
+        self.scanner = None
+        self.safety = None
+        
+        # Initialize Agent SDK components
+        self.agent = None
+        self.chat_interface = None
+        self.telegram_agent_interface = None
+        self._initialize_agent_sdk()
+        
+        # Admin configuration
+        self.admin_chat_id = None
+        self.pending_swaps = {}
         
         # Command handlers
-        self.commands = {
+        self.command_handlers = {
             '/start': self._handle_start,
             '/help': self._handle_help,
             '/status': self._handle_status,
             '/balance': self._handle_balance,
-            '/analyze': self._handle_analyze,
             '/swap': self._handle_swap,
+            '/analyze': self._handle_analyze,
             '/positions': self._handle_positions,
             '/settings': self._handle_settings,
-            '/stop': self._handle_stop,
+            '/scan': self._handle_market_scan,
             '/start_auto': self._handle_start_auto,
             '/stop_auto': self._handle_stop_auto,
             '/auto_status': self._handle_auto_status,
-            '/scan': self._handle_market_scan,
-            '/autonomous': self._handle_start_autonomous
+            '/autonomous': self._handle_autonomous,
+            
+            # New Agent SDK commands
+            '/chat': self._handle_chat,
+            '/ask': self._handle_chat,
+            '/talk': self._handle_chat,
+            '/agent': self._handle_chat,
+            '/ai': self._handle_chat,
+            '/clear': self._handle_clear_chat
         }
+        
+        logger.info("🤖 Telegram Bot initialized with Agent SDK")
     
+    def _initialize_agent_sdk(self):
+        """Initialize the OpenAI Agent SDK components"""
+        try:
+            # Check if OpenAI is configured
+            openai_key = os.getenv('OPENAI_API_KEY')
+            assistant_id = os.getenv('OPENAI_ASSISTANT_ID')
+            
+            if openai_key and assistant_id:
+                logger.info("🧠 Initializing OpenAI Agent SDK...")
+                
+                # Initialize agent with bot components
+                self.agent = GrokBotAgent(
+                    trader=self.trader,
+                    wallet=self.wallet,
+                    strategy=self.strategy,
+                    scanner=self.scanner,
+                    safety=self.safety
+                )
+                
+                # Initialize chat interface
+                self.chat_interface = ChatInterface(self.agent)
+                self.telegram_agent_interface = TelegramAgentInterface(self.chat_interface)
+                
+                logger.info("✅ Agent SDK initialized successfully")
+            else:
+                logger.warning("⚠️ OpenAI credentials not found - Agent SDK disabled")
+                self.agent = None
+                self.chat_interface = None
+                self.telegram_agent_interface = None
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize Agent SDK: {e}")
+            self.agent = None
+            self.chat_interface = None
+            self.telegram_agent_interface = None
+
+    async def initialize_strategy(self):
+        """Initialize strategy and related components"""
+        try:
+            # Initialize strategy
+            self.strategy = TradingStrategy(self.trader, self.wallet, telegram_bot=self)
+            
+            # Initialize scanner and safety
+            self.scanner = SolanaTokenScanner()
+            self.safety = SolanaTokenSafety(self.wallet)
+            
+            # Update agent with new components
+            if self.agent:
+                self.agent.strategy = self.strategy
+                self.agent.scanner = self.scanner
+                self.agent.safety = self.safety
+                
+            logger.info("✅ Strategy and components initialized")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize strategy: {e}")
+
     async def send_message(self, chat_id: int, text: str, parse_mode: str = 'Markdown') -> bool:
         """Send message to Telegram chat"""
         try:
@@ -104,7 +163,7 @@ class TelegramBotManager:
         """Handle /start command"""
         try:
             # Authenticate user
-            auth_result = await self.auth_manager.handle_telegram_start(chat_id, username)
+            auth_result = await self.auth.handle_telegram_start(chat_id, username)
             
             if auth_result['success']:
                 welcome_msg = f"""
@@ -143,16 +202,29 @@ Ready to hunt memecoins! 🦎💎
     async def _handle_help(self, chat_id: int, args: list = None) -> None:
         """Handle /help command"""
         help_msg = """
-🤖 **Grok Trading Bot - Enhanced Commands**
+🤖 **GROKBOT - AI-POWERED TRADING ASSISTANT**
+
+**🧠 AI CHAT (NEW!):**
+`/chat <message>` - 💬 **Talk naturally with AI assistant**
+`/ask <question>` - 🤔 **Ask anything about trading**
+`/ai <request>` - 🤖 **Natural language commands**
+`/clear` - 🗑️ **Clear conversation history**
+*Or just type normally - no command needed!*
 
 **📊 MARKET ANALYSIS:**
-`/scan` - 🔍 **One-shot market opportunity scan**
+`/scan` - 🔍 **Enhanced market opportunity scan**
+`/scan detailed` - 📋 **Deep dive analysis with rejection reasons**
 `/analyze <token_address>` - Detailed token analysis
 `/balance` - Check wallet balance & portfolio
 
 **💰 MANUAL TRADING:**
-`/swap <amount> <from> <to>` - Execute token swap
+`/swap <amount> <from> <to>` - Execute token swap (USDC/SOL to ANY token!)
 `/positions` - View active trading positions
+
+**💱 SWAP EXAMPLES:**
+`/swap 1 USDC SOL` - Use token symbols
+`/swap 1 USDC BONK` - Buy memecoins with USDC
+`/swap 1 USDC DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263` - Use any contract address
 
 **🤖 AUTOMATED TRADING:**
 `/start_auto` - Basic automation (existing tokens)
@@ -169,6 +241,13 @@ Ready to hunt memecoins! 🦎💎
 `/swap 1 USDC SOL` - Buy SOL with USDC
 `/autonomous` - Start autonomous sniping
 
+**💬 AI CHAT EXAMPLES:**
+"What's trending right now?"
+"Buy 1 USDC of WIF"
+"Show me my balance"
+"Scan for good opportunities"
+"What did we trade today?"
+
 **🛡️ NEW SAFETY FEATURES:**
 • **Honeypot Detection** - Simulates buy/sell tests
 • **Rug Analysis** - Checks mint authority & holders
@@ -183,6 +262,8 @@ Ready to hunt memecoins! 🦎💎
 
 **🎯 AUTONOMOUS MODE:**
 Fully automated token discovery, safety analysis, and trading!
+
+🔥 **Try saying:** "What's pumping?" or "Buy some BONK" or just ask me anything!
 
 Need help? The bot is now smarter than ever! 🚀
         """
@@ -279,10 +360,15 @@ Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             await self.send_message(chat_id, f"❌ Error during analysis: {str(e)}")
     
     async def _handle_swap(self, chat_id: int, args: list = None) -> None:
-        """Handle /swap command"""
+        """Handle /swap command - supports USDC/SOL to ANY Solana token with automatic SOL routing"""
         if not args or len(args) < 3:
             await self.send_message(chat_id, 
-                "❌ Invalid swap format.\nExample: `/swap 1 USDC SOL`\nFormat: `/swap <amount> <from_token> <to_token>`")
+                "❌ Invalid swap format.\n"
+                "**Examples:**\n"
+                "`/swap 1 USDC SOL` - Direct swap\n"
+                "`/swap 1 USDC BONK` - Auto-routes via SOL\n"
+                "`/swap 1 USDC DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263` - Use any contract\n"
+                "**Format:** `/swap <amount> <from_token> <to_token>`")
             return
         
         try:
@@ -290,94 +376,213 @@ Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             from_token = args[1].upper()
             to_token = args[2].upper()
             
-            # Token address mapping
-            token_addresses = {
+            # Common token symbols with addresses
+            known_tokens = {
                 'USDC': 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
                 'SOL': 'So11111111111111111111111111111111111111112',
-                'BONK': 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263'
+                'BONK': 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263',
+                'WIF': 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm',
+                'POPCAT': '7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr',
+                'WEN': 'WENWENvqqNya429ubCdR81ZmD69brwQaaBYY6p3LCpk',
+                'BOME': 'ukHH6c7mMyiWCf1b9pnWe25TSpkDDt3H5pQZgZ74J82',
+                'PEPE': '9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump',
+                'MEW': 'MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUzScPP5',
+                'MYRO': 'HhJpBhRRn4g56VsyLuT8DL5Bv31HkXqsrahTTUCZeZg4'
             }
             
-            if from_token not in token_addresses or to_token not in token_addresses:
+            # Function to resolve token (symbol or address)
+            def resolve_token(token_input: str) -> str:
+                # If it's a known symbol, return the address
+                if token_input in known_tokens:
+                    return known_tokens[token_input]
+                # If it looks like a Solana address (base58, ~44 chars), use it directly
+                elif len(token_input) >= 32 and len(token_input) <= 44:
+                    return token_input
+                else:
+                    return None
+            
+            from_address = resolve_token(from_token)
+            to_address = resolve_token(to_token)
+            
+            if not from_address:
                 await self.send_message(chat_id, 
-                    f"❌ Unsupported token. Supported: {', '.join(token_addresses.keys())}")
+                    f"❌ Unknown from_token: `{from_token}`\n"
+                    f"**Supported symbols:** {', '.join(known_tokens.keys())}\n"
+                    f"**Or use:** Token contract address")
+                return
+                
+            if not to_address:
+                await self.send_message(chat_id, 
+                    f"❌ Unknown to_token: `{to_token}`\n"
+                    f"**Supported symbols:** {', '.join(known_tokens.keys())}\n"
+                    f"**Or use:** Token contract address")
                 return
             
-            from_address = token_addresses[from_token]
-            to_address = token_addresses[to_token]
+            # Determine token decimals (most SPL tokens use 6 or 9)
+            def get_token_decimals(token_symbol: str, token_address: str) -> int:
+                # Known decimals for specific tokens
+                token_decimals = {
+                    'USDC': 6, 'SOL': 9, 'BONK': 5, 'WIF': 6, 'POPCAT': 9,
+                    'WEN': 5, 'BOME': 6, 'PEPE': 6, 'MEW': 6, 'MYRO': 9
+                }
+                # Use known decimals if available, otherwise default to 6 (most common)
+                return token_decimals.get(token_symbol, 6)
+            
+            from_decimals = get_token_decimals(from_token, from_address)
+            to_decimals = get_token_decimals(to_token, to_address)
             
             # Convert amount to smallest units
-            decimals = 6 if from_token == 'USDC' else 9  # USDC has 6 decimals, SOL has 9
-            amount_units = int(amount * (10 ** decimals))
+            amount_units = int(amount * (10 ** from_decimals))
             
-            await self.send_message(chat_id, 
-                f"🔄 Getting swap route for {amount} {from_token} → {to_token}...")
+            # 🚀 NEW: Check if we need SOL routing (GMGN API requirement)
+            sol_address = 'So11111111111111111111111111111111111111112'
+            needs_sol_routing = (from_address != sol_address and to_address != sol_address)
             
-            # Get swap route
-            route_result = await self.trader.get_swap_route(
-                token_in_address=from_address,
-                token_out_address=to_address,
-                in_amount=str(amount_units),
-                from_address=self.wallet.get_address(),  # Use our actual wallet address!
-                slippage=1.0,
-                print_debug=False
-            )
-            
-            if route_result['success']:
-                quote = route_result['quote']
-                
-                # Calculate output amount based on token decimals
-                out_decimals = 9 if to_token == 'SOL' else 6  # SOL has 9, USDC has 6
-                out_amount = float(quote['outAmount']) / (10 ** out_decimals)
-                price_impact = float(quote.get('priceImpactPct', 0))
-                
-                # Execute swap immediately to avoid timestamp expiry
+            if needs_sol_routing:
                 await self.send_message(chat_id, 
-                    f"⚡ Executing {amount} {from_token} → {to_token} swap immediately...")
+                    f"🔄 GMGN requires SOL routing. Executing: {from_token} → SOL → {to_token}\n"
+                    f"This may take 2 transactions...")
                 
-                # Get the raw transaction
-                raw_tx = route_result.get('raw_tx', {})
-                if isinstance(raw_tx, dict):
-                    raw_tx = raw_tx.get('swapTransaction', raw_tx)
+                # Step 1: FROM_TOKEN -> SOL
+                await self.send_message(chat_id, f"Step 1/2: {amount} {from_token} → SOL...")
                 
-                # Execute the swap
-                result = await self.wallet.execute_swap(raw_tx)
+                route_result_1 = await self.trader.get_swap_route(
+                    token_in_address=from_address,
+                    token_out_address=sol_address,
+                    in_amount=str(amount_units),
+                    from_address=self.wallet.get_address(),
+                    slippage=2.0,  # Higher slippage for multi-hop
+                    print_debug=False
+                )
                 
-                if result['success']:
+                if not route_result_1['success']:
+                    await self.send_message(chat_id, f"❌ Step 1 failed: {route_result_1.get('error')}")
+                    return
+                
+                # Execute first swap
+                raw_tx_1 = route_result_1.get('raw_tx', {})
+                if isinstance(raw_tx_1, dict):
+                    raw_tx_1 = raw_tx_1.get('swapTransaction', raw_tx_1)
+                
+                result_1 = await self.wallet.execute_swap(raw_tx_1)
+                
+                if not result_1['success']:
+                    await self.send_message(chat_id, f"❌ Step 1 execution failed: {result_1.get('error')}")
+                    return
+                
+                sol_received = float(route_result_1['quote']['outAmount']) / (10 ** 9)  # SOL has 9 decimals
+                await self.send_message(chat_id, 
+                    f"✅ Step 1 complete: Received {sol_received:.6f} SOL\n"
+                    f"🔗 [Transaction](https://solscan.io/tx/{result_1.get('signature')})")
+                
+                # Small delay to ensure transaction is confirmed
+                await asyncio.sleep(3)
+                
+                # Step 2: SOL -> TO_TOKEN
+                await self.send_message(chat_id, f"Step 2/2: SOL → {to_token}...")
+                
+                # Use the SOL we received (with small buffer for fees)
+                sol_amount_units = int(sol_received * 0.98 * (10 ** 9))  # 98% to account for fees
+                
+                route_result_2 = await self.trader.get_swap_route(
+                    token_in_address=sol_address,
+                    token_out_address=to_address,
+                    in_amount=str(sol_amount_units),
+                    from_address=self.wallet.get_address(),
+                    slippage=2.0,
+                    print_debug=False
+                )
+                
+                if not route_result_2['success']:
+                    await self.send_message(chat_id, f"❌ Step 2 failed: {route_result_2.get('error')}")
+                    return
+                
+                # Execute second swap
+                raw_tx_2 = route_result_2.get('raw_tx', {})
+                if isinstance(raw_tx_2, dict):
+                    raw_tx_2 = raw_tx_2.get('swapTransaction', raw_tx_2)
+                
+                result_2 = await self.wallet.execute_swap(raw_tx_2)
+                
+                if result_2['success']:
+                    final_amount = float(route_result_2['quote']['outAmount']) / (10 ** to_decimals)
+                    
                     success_msg = f"""
+🎉 **2-STEP SWAP COMPLETED!**
+
+💱 **Final Result:**
+• From: {amount} {from_token}
+• To: {final_amount:.6f} {to_token}
+• Route: {from_token} → SOL → {to_token}
+
+📊 **Transaction Details:**
+• Step 1: [View on Solscan](https://solscan.io/tx/{result_1.get('signature')})
+• Step 2: [View on Solscan](https://solscan.io/tx/{result_2.get('signature')})
+
+⚡ **Multi-hop routing required by GMGN API**
+                    """
+                    await self.send_message(chat_id, success_msg)
+                else:
+                    await self.send_message(chat_id, f"❌ Step 2 execution failed: {result_2.get('error')}")
+                
+            else:
+                # Direct swap (one token is SOL)
+                await self.send_message(chat_id, 
+                    f"🔄 Direct swap: {amount} {from_token} → {to_token}...")
+                
+                # Get swap route
+                route_result = await self.trader.get_swap_route(
+                    token_in_address=from_address,
+                    token_out_address=to_address,
+                    in_amount=str(amount_units),
+                    from_address=self.wallet.get_address(),
+                    slippage=1.0,
+                    print_debug=False
+                )
+                
+                if route_result['success']:
+                    quote = route_result['quote']
+                    
+                    # Calculate output amount using correct decimals
+                    out_amount = float(quote['outAmount']) / (10 ** to_decimals)
+                    price_impact = float(quote.get('priceImpactPct', 0))
+                    
+                    # Execute swap immediately to avoid timestamp expiry
+                    await self.send_message(chat_id, 
+                        f"⚡ Executing swap immediately to avoid timeout...")
+                    
+                    # Get the raw transaction
+                    raw_tx = route_result.get('raw_tx', {})
+                    if isinstance(raw_tx, dict):
+                        raw_tx = raw_tx.get('swapTransaction', raw_tx)
+                    
+                    # Execute the swap
+                    result = await self.wallet.execute_swap(raw_tx)
+                    
+                    if result['success']:
+                        success_msg = f"""
 🎉 **SWAP EXECUTED SUCCESSFULLY!**
 
 💱 **Trade Completed:**
 • From: {amount} {from_token}
-• To: ~{out_amount:.6f} {to_token}
-• Price Impact: {price_impact}%
-• Route: {quote.get('routePlan', [{}])[0].get('swapInfo', {}).get('label', 'Unknown')}
-• USD In: ${route_result.get('amount_in_usd', 'N/A')}
-• USD Out: ${route_result.get('amount_out_usd', 'N/A')}
+• To: {out_amount:.6f} {to_token}
+• Price Impact: {price_impact:.2f}%
 
-🔗 **Transaction:** {result['explorer_url']}
+🔗 **Transaction:** [View on Solscan](https://solscan.io/tx/{result.get('signature')})
 
-✅ Check your updated balance with /balance"""
-                    
-                    await self.send_message(chat_id, success_msg)
+⚡ **Direct swap (one token was SOL)**
+                        """
+                        await self.send_message(chat_id, success_msg)
+                    else:
+                        await self.send_message(chat_id, f"❌ Swap execution failed: {result.get('error')}")
                 else:
-                    error_msg = f"""
-❌ **SWAP FAILED**
-
-Error: {result.get('error', 'Unknown error')}
-
-Try again or check your balance with /balance"""
+                    await self.send_message(chat_id, f"❌ Failed to get swap route: {route_result.get('error')}")
                     
-                    await self.send_message(chat_id, error_msg)
-                
-                return
-                
-            else:
-                await self.send_message(chat_id, f"❌ Failed to get swap route: {route_result['error']}")
-        
         except ValueError:
-            await self.send_message(chat_id, "❌ Invalid amount. Please enter a number.")
+            await self.send_message(chat_id, "❌ Invalid amount. Please enter a valid number.")
         except Exception as e:
-            await self.send_message(chat_id, f"❌ Swap error: {str(e)}")
+            logger.error(f"Swap error: {e}")
+            await self.send_message(chat_id, f"❌ Swap failed: {str(e)}")
     
     async def _execute_pending_swap(self, chat_id: int) -> None:
         """Execute a pending swap transaction"""
@@ -554,45 +759,111 @@ Use `/start` to reactivate trading.
         """
         await self.send_message(chat_id, stop_msg)
     
+    async def _handle_chat(self, chat_id: int, args: list = None) -> None:
+        """Handle natural language chat with the AI agent"""
+        if chat_id != self.admin_chat_id:
+            await self.send_message(chat_id, "❌ Unauthorized. Only the bot owner can use AI chat.")
+            return
+        
+        if not self.telegram_agent_interface:
+            await self.send_message(chat_id, "🤖 **AI CHAT UNAVAILABLE**\n\n❌ OpenAI Agent SDK is not configured.\n\n📋 To enable AI chat:\n1. Set OPENAI_API_KEY in environment\n2. Set OPENAI_ASSISTANT_ID in environment\n3. Restart the bot\n\n💬 Use regular commands like `/scan`, `/balance` instead.")
+            return
+        
+        if not args:
+            await self.send_message(chat_id, "🤖 **AI CHAT MODE**\n\nHi! I'm GrokBot's AI assistant. Ask me anything about trading!\n\n**Examples:**\n• What's trending right now?\n• Show me my balance\n• Scan for opportunities\n• Buy 1 USDC of BONK\n• What did we trade today?\n\n**Usage:** `/chat <your message>`")
+            return
+        
+        user_message = ' '.join(args)
+        
+        try:
+            # Show typing indicator
+            await self.send_message(chat_id, "🤖 *Thinking...*")
+            
+            # Process through agent
+            response = await self.telegram_agent_interface.handle_telegram_message(user_message, chat_id)
+            
+            # Send response
+            await self.send_message(chat_id, response)
+            
+        except Exception as e:
+            logger.error(f"AI chat error: {e}")
+            await self.send_message(chat_id, f"🤖 Sorry, I encountered an error: {str(e)}")
+    
+    async def _handle_clear_chat(self, chat_id: int, args: list = None) -> None:
+        """Clear the AI chat conversation history"""
+        if chat_id != self.admin_chat_id:
+            await self.send_message(chat_id, "❌ Unauthorized.")
+            return
+        
+        if not self.chat_interface:
+            await self.send_message(chat_id, "❌ AI chat is not available")
+            return
+        
+        try:
+            self.chat_interface.clear_session(str(chat_id), "telegram")
+            await self.send_message(chat_id, "🗑️ **CONVERSATION CLEARED**\n\nYour AI chat history has been reset!")
+        except Exception as e:
+            await self.send_message(chat_id, f"❌ Error clearing chat: {str(e)}")
+
     async def process_message(self, message: Dict[str, Any]) -> None:
         """Process incoming Telegram message"""
         try:
-            chat_id = message['chat']['id']
-            text = message.get('text', '')
-            username = message.get('from', {}).get('username')
+            # Extract message info
+            chat_id = message.get('chat', {}).get('id')
+            user_id = message.get('from', {}).get('id')
+            text = message.get('text', '').strip()
             
-            # Handle confirmation responses (YES/NO)
-            if text.upper() in ['YES', 'NO']:
-                if text.upper() == 'YES':
-                    # Execute the pending swap
-                    await self._execute_pending_swap(chat_id)
-                else:
-                    # Cancel the pending swap
-                    if chat_id in self.pending_swaps:
-                        del self.pending_swaps[chat_id]
-                    await self.send_message(chat_id, "❌ Swap cancelled.")
+            if not chat_id or not user_id or not text:
                 return
             
-            if not text.startswith('/'):
-                await self.send_message(chat_id, 
-                    "ℹ️ Please use commands starting with /\nType /help for available commands.")
-                return
+            # Authenticate user
+            if not self.auth.is_authenticated(user_id):
+                auth_result = self.auth.authenticate_user(user_id, message.get('from', {}))
+                if not auth_result:
+                    await self.send_message(chat_id, "❌ Authentication failed. Please contact the bot owner.")
+                    return
             
-            # Parse command and arguments
+            # Set admin chat ID on first interaction
+            if self.admin_chat_id is None:
+                self.admin_chat_id = chat_id
+                logger.info(f"✅ Admin chat ID set: {chat_id}")
+            
+            # Check for natural language (non-command) messages
+            if not text.startswith('/') and self.telegram_agent_interface:
+                # Handle as natural language conversation
+                try:
+                    await self.send_message(chat_id, "🤖 *Processing...*")
+                    response = await self.telegram_agent_interface.handle_telegram_message(text, user_id)
+                    await self.send_message(chat_id, response)
+                    return
+                except Exception as e:
+                    logger.error(f"Natural language processing error: {e}")
+                    # Fall back to command processing
+            
+            # Parse command
             parts = text.split()
-            command = parts[0]
+            command = parts[0].lower()
             args = parts[1:] if len(parts) > 1 else []
             
-            # Execute command
-            if command in self.commands:
-                await self.commands[command](chat_id, args)
+            # Handle command
+            if command in self.command_handlers:
+                await self.command_handlers[command](chat_id, args)
             else:
-                await self.send_message(chat_id, 
-                    f"❌ Unknown command: {command}\nType /help for available commands.")
-        
+                # Try agent command conversion if available
+                if self.telegram_agent_interface:
+                    try:
+                        response = await self.telegram_agent_interface.handle_telegram_command(command, args, user_id)
+                        await self.send_message(chat_id, response)
+                    except Exception as e:
+                        await self.send_message(chat_id, f"❓ Unknown command: {command}\n\nType /help for available commands or just ask me anything!")
+                else:
+                    await self.send_message(chat_id, f"❓ Unknown command: {command}\n\nType /help for available commands.")
+                    
         except Exception as e:
-            logger.error(f"Error processing message: {e}")
-    
+            logger.error(f"Message processing error: {e}")
+            if 'chat_id' in locals():
+                await self.send_message(chat_id, "❌ An error occurred processing your message.")
+
     async def start_polling(self):
         """Start polling for Telegram messages"""
         logger.info("Starting Telegram bot polling...")
@@ -701,15 +972,32 @@ Use `/start` to reactivate trading.
             else:
                 scan_msg += "❌ **NO OPPORTUNITIES FOUND**\n\n"
                 
-                # Show why tokens were rejected (top 3 reasons)
-                rejection_reasons = {}
+                # Show market overview
+                rejection_summary = {}
+                price_movements = {'pumping': 0, 'dumping': 0, 'flat': 0, 'stable': 0, 'unknown': 0}
+                
                 for rejected in scan_results['rejected_tokens']:
                     reason = rejected.get('rejection_reason', 'Unknown')
-                    rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
-                    
-                top_reasons = sorted(rejection_reasons.items(), key=lambda x: x[1], reverse=True)[:3]
+                    rejection_summary[reason] = rejection_summary.get(reason, 0) + 1
+                    movement = rejected.get('price_movement', 'unknown')
+                    price_movements[movement] = price_movements.get(movement, 0) + 1
                 
-                scan_msg += "**Top Rejection Reasons:**\n"
+                # Market overview
+                total_tokens = len(scan_results['rejected_tokens'])
+                scan_msg += "📊 **MARKET OVERVIEW:**\n"
+                scan_msg += f"• Tokens Analyzed: {total_tokens}\n"
+                
+                if price_movements['pumping'] > 0:
+                    scan_msg += f"• 🚀 Pumping: {price_movements['pumping']} tokens\n"
+                if price_movements['dumping'] > 0:
+                    scan_msg += f"• 📉 Dumping: {price_movements['dumping']} tokens\n"
+                if price_movements['flat'] > 0:
+                    scan_msg += f"• 😴 Flat/Sideways: {price_movements['flat']} tokens\n"
+                if price_movements['stable'] > 0:
+                    scan_msg += f"• 📊 Stable: {price_movements['stable']} tokens\n"
+                
+                scan_msg += "\n**🚫 WHY NO OPPORTUNITIES:**\n"
+                top_reasons = sorted(rejection_summary.items(), key=lambda x: x[1], reverse=True)[:3]
                 for reason, count in top_reasons:
                     scan_msg += f"• {reason}: {count} tokens\n"
                 scan_msg += "\n"
@@ -720,9 +1008,70 @@ Use `/start` to reactivate trading.
                 scan_msg += f"• {rec['message']}\n"
                 if rec.get('action'):
                     scan_msg += f"  *Action:* `{rec['action']}`\n"
+                    
+            scan_msg += "\n💡 *Send `/scan detailed` for specific token breakdowns*"
             
             # Send the comprehensive report
             await self.send_message(chat_id, scan_msg)
+            
+            # If user requested detailed analysis, show detailed feedback for rejected tokens
+            if args and len(args) > 0 and args[0].lower() == 'detailed':
+                await self.send_message(chat_id, "📋 **DETAILED TOKEN ANALYSIS:**\n\nSending detailed breakdown for each token...")
+                
+                # Send detailed feedback for the most interesting rejected tokens (up to 4)
+                interesting_tokens = []
+                
+                # Prioritize tokens by how close they came to being opportunities
+                for rejected in scan_results['rejected_tokens']:
+                    if rejected.get('detailed_feedback') and rejected.get('rejection_reason') != 'Analysis error':
+                        # Add a priority score
+                        priority = 0
+                        if rejected.get('price_movement') == 'pumping':
+                            priority += 3
+                        if rejected.get('rejection_reason') in ['Moderate price impact', 'High round-trip cost']:
+                            priority += 2
+                        if rejected.get('rejection_reason') == 'Poor exit liquidity':
+                            priority += 1
+                        
+                        rejected['priority'] = priority
+                        interesting_tokens.append(rejected)
+                
+                # Sort by priority and take top 4
+                interesting_tokens.sort(key=lambda x: x.get('priority', 0), reverse=True)
+                
+                for token_info in interesting_tokens[:4]:
+                    if token_info.get('detailed_feedback'):
+                        # Split long messages if needed
+                        feedback = token_info['detailed_feedback']
+                        if len(feedback) > 4000:  # Telegram message limit
+                            parts = feedback.split('\n\n')
+                            current_msg = ""
+                            for part in parts:
+                                if len(current_msg + part) > 3800:
+                                    await self.send_message(chat_id, current_msg)
+                                    await asyncio.sleep(1)  # Small delay between messages
+                                    current_msg = part + "\n\n"
+                                else:
+                                    current_msg += part + "\n\n"
+                            if current_msg.strip():
+                                await self.send_message(chat_id, current_msg)
+                        else:
+                            await self.send_message(chat_id, feedback)
+                        
+                        await asyncio.sleep(2)  # Delay between detailed token reports
+                
+                if not interesting_tokens:
+                    await self.send_message(chat_id, "🤷‍♂️ No detailed analysis available - all tokens had basic routing or technical issues.")
+            
+            elif not scan_results['opportunities']:
+                # Show a quick hint about getting more details
+                hint_msg = "🔍 **WANT MORE DETAILS?**\n\n"
+                hint_msg += "For specific insights on why each token was rejected:\n"
+                hint_msg += "`/scan detailed`\n\n"
+                hint_msg += "This will show you exactly what's wrong with each token, including:\n"
+                hint_msg += "• Real-time price movements\n• Liquidity analysis\n• Trading cost breakdowns\n• Risk assessments"
+                
+                await self.send_message(chat_id, hint_msg)
             
             # If there are opportunities, send detailed breakdown for the best one
             if scan_results['opportunities']:
@@ -791,10 +1140,10 @@ To enable full autonomous trading:
 async def test_telegram_bot():
     """Test Telegram bot functionality"""
     try:
-        bot = TelegramBotManager()
+        bot = TelegramBot()
         print("✅ Telegram bot initialized successfully")
         print(f"Bot token: {bot.token[:10]}...")
-        print("Available commands:", list(bot.commands.keys()))
+        print("Available commands:", list(bot.command_handlers.keys()))
         return True
     except Exception as e:
         print(f"❌ Telegram bot test failed: {e}")
